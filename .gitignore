@@ -33,3 +33,7 @@ out/
 models/
 *.gguf
 *.safetensors
+
+# Local planning / review artifacts
+.plans/
+.reviews/
