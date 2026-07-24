@@ -31,7 +31,7 @@ English only. One file per run.
 brew install ffmpeg uv
 
 # 2) get this project
-git clone <THIS_REPO_URL> stt
+git clone https://github.com/maxedapps/stt.git
 cd stt
 
 # 3) install the global `stt` command (~/.local/bin/stt)
@@ -171,3 +171,19 @@ Then their first transcription can run with less or no network (`HF_HUB_OFFLINE=
 ## Limits (by design)
 
 No batch folder mode, live microphone streaming, speaker labels, language selection, or cloud/API server in this tool. One English file in → four caption/transcript files out.
+
+## License and acknowledgments
+
+**stt** (this application’s source code) is released under the [MIT License](LICENSE).
+
+At runtime it uses third-party components that keep their own licenses:
+
+| Component | License | What it’s for |
+|---|---|---|
+| [Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) | Apache 2.0 | Speech recognition model (downloaded on first use) |
+| [Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B) | Apache 2.0 | Word/unit timestamps (downloaded on first use) |
+| [mlx-qwen3-asr](https://github.com/moona3k/mlx-qwen3-asr) | Apache 2.0 | MLX inference runtime on Apple Silicon |
+
+Those model weights are **not** included in this git repo; Hugging Face serves them under Apache 2.0 when `stt` downloads them into your local cache. Using this tool does not grant Qwen/Alibaba trademark rights or imply their endorsement.
+
+Full third-party notes: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
