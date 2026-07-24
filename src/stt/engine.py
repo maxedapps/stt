@@ -239,6 +239,8 @@ def _call_transcribe(
     input_path: Path,
     asr_path: Path,
     aligner_path: Path,
+    *,
+    context: str = "",
 ) -> Any:
     """Invoke mlx_qwen3_asr.transcribe exactly once with fixed English/timestamp args."""
     from mlx_qwen3_asr import transcribe as mlx_transcribe
@@ -249,6 +251,7 @@ def _call_transcribe(
         language=_FORCED_LANGUAGE,
         return_timestamps=True,
         forced_aligner=str(aligner_path),
+        context=context,
     )
 
 
@@ -259,7 +262,7 @@ def _progress(message: str) -> None:
     print(f"stt: {message}", file=sys.stderr, flush=True)
 
 
-def run_transcription(input_path: Path) -> Transcription:
+def run_transcription(input_path: Path, *, context: str = "") -> Transcription:
     """Resolve pinned snapshots, run one inference call, and validate the result."""
     _progress("resolving ASR model (cache-first)…")
     asr_path = resolve_snapshot(ASR_MODEL_ID, ASR_REVISION)
@@ -269,11 +272,21 @@ def run_transcription(input_path: Path) -> Transcription:
     aligner_path = resolve_snapshot(ALIGNER_MODEL_ID, ALIGNER_REVISION)
     _progress(f"aligner ready: {aligner_path}")
 
+    if context:
+        _progress(f"using domain context ({len(context.split())} whitespace tokens)…")
+    else:
+        _progress("no domain context terms")
+
     _progress(
         "transcribing + aligning (often the long step; loads models, then runs MLX)…"
     )
     try:
-        raw = _call_transcribe(input_path, asr_path, aligner_path)
+        raw = _call_transcribe(
+            input_path,
+            asr_path,
+            aligner_path,
+            context=context,
+        )
     except EngineError:
         raise
     except Exception as exc:
@@ -288,11 +301,15 @@ def transcribe_file(
     output_dir: Path,
     *,
     overwrite: bool = False,
+    context: str = "",
 ) -> list[Path]:
     """Orchestrate preflight → resolve → one inference → validate → publish.
 
     Collision preflight runs before any model resolution. Caption restoration
     and atomic multi-artifact publish run after a validated Transcription.
+
+    ``context`` is optional domain vocabulary passed to Qwen3-ASR (space-joined
+    terms from a terms file).
     """
     from stt.outputs import preflight_targets, publish_artifacts, target_paths
 
@@ -300,7 +317,7 @@ def transcribe_file(
     targets = target_paths(input_path, output_dir)
     preflight_targets(input_path, targets, overwrite=overwrite)
 
-    result = run_transcription(input_path)
+    result = run_transcription(input_path, context=context)
 
     unit_count = len(result.units)
     _progress(

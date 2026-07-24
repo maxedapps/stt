@@ -471,6 +471,44 @@ def test_run_transcription_calls_mlx_once_with_exact_args(
         language="English",
         return_timestamps=True,
         forced_aligner=str(aligner),
+        context="",
+    )
+
+
+def test_run_transcription_passes_context_to_mlx(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    media = tmp_path / "clip.wav"
+    media.write_bytes(b"fake")
+    asr = tmp_path / "asr"
+    aligner = tmp_path / "aligner"
+    asr.mkdir()
+    aligner.mkdir()
+
+    def fake_resolve(repo_id: str, revision: str) -> Path:
+        return asr if repo_id == ASR_MODEL_ID else aligner
+
+    mlx_transcribe = MagicMock(
+        return_value=FakeResult(
+            text="Hi",
+            language="English",
+            segments=[{"text": "Hi", "start": 0.0, "end": 0.2}],
+        )
+    )
+
+    monkeypatch.setattr("stt.engine.resolve_snapshot", fake_resolve)
+    import mlx_qwen3_asr
+
+    monkeypatch.setattr(mlx_qwen3_asr, "transcribe", mlx_transcribe)
+
+    run_transcription(media, context="Academind App Router")
+    mlx_transcribe.assert_called_once_with(
+        media,
+        model=str(asr),
+        language="English",
+        return_timestamps=True,
+        forced_aligner=str(aligner),
+        context="Academind App Router",
     )
 
 
@@ -547,14 +585,21 @@ def test_transcribe_file_preflight_passes_then_runs_inference(
         out / "talk.vtt",
     ]
 
-    monkeypatch.setattr("stt.engine.run_transcription", lambda p: validated)
+    seen: dict[str, str] = {}
+
+    def fake_run(path: Path, *, context: str = "") -> Transcription:
+        seen["context"] = context
+        return validated
+
+    monkeypatch.setattr("stt.engine.run_transcription", fake_run)
     monkeypatch.setattr(
         "stt.outputs.publish_artifacts",
         lambda input_path, output_dir, result, *, overwrite: published,
     )
 
-    paths = transcribe_file(media, out, overwrite=False)
+    paths = transcribe_file(media, out, overwrite=False, context="foo bar")
     assert paths == published
+    assert seen["context"] == "foo bar"
     err = capsys.readouterr().err
     assert "stt: checking output paths…" in err
     assert "stt: writing artifacts (1 timed unit)…" in err

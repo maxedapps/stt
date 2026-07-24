@@ -6,6 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
+from stt.terms import (
+    DEFAULT_TERMS_PATH,
+    TermsError,
+    load_terms_file,
+    terms_flag_was_explicit,
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -32,6 +39,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace existing output artifacts with the same names.",
     )
+    parser.add_argument(
+        "--terms",
+        type=Path,
+        default=DEFAULT_TERMS_PATH,
+        help=(
+            "Text file with one keyword/term per line (terms may contain spaces). "
+            f"Default: {DEFAULT_TERMS_PATH} in the current directory; "
+            "if the default file is missing, transcription continues without terms. "
+            "An explicitly passed path must exist."
+        ),
+    )
     return parser
 
 
@@ -43,7 +61,11 @@ def _apple_silicon_hint(exc: BaseException) -> str:
 
 
 def transcribe_file(
-    input_path: Path, output_dir: Path, *, overwrite: bool
+    input_path: Path,
+    output_dir: Path,
+    *,
+    overwrite: bool,
+    context: str = "",
 ) -> list[Path]:
     """Run inference and publish artifacts.
 
@@ -57,7 +79,12 @@ def transcribe_file(
         raise RuntimeError(_apple_silicon_hint(exc)) from exc
 
     try:
-        return _engine_transcribe(input_path, output_dir, overwrite=overwrite)
+        return _engine_transcribe(
+            input_path,
+            output_dir,
+            overwrite=overwrite,
+            context=context,
+        )
     except Exception as exc:
         # Preserve root cause; attach platform hint only for import/runtime MLX failures.
         name = type(exc).__module__ + "." + type(exc).__name__
@@ -73,6 +100,8 @@ def run(argv: list[str] | None = None) -> int:
     input_path: Path = args.INPUT
     output_dir: Path = args.output_dir
     overwrite: bool = args.overwrite
+    terms_path: Path = args.terms
+    terms_required = terms_flag_was_explicit(argv)
 
     if not input_path.is_file():
         if input_path.exists() and input_path.is_dir():
@@ -91,10 +120,41 @@ def run(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    try:
+        context, terms = load_terms_file(terms_path, required=terms_required)
+    except TermsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if terms:
+        print(
+            f"stt: loaded {len(terms)} term{'s' if len(terms) != 1 else ''} "
+            f"from {terms_path}",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif terms_path.exists():
+        print(
+            f"stt: terms file {terms_path} has no usable terms",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            f"stt: no terms file at {terms_path} (continuing without domain context)",
+            file=sys.stderr,
+            flush=True,
+        )
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        paths = transcribe_file(input_path, output_dir, overwrite=overwrite)
+        paths = transcribe_file(
+            input_path,
+            output_dir,
+            overwrite=overwrite,
+            context=context,
+        )
     except Exception as exc:  # noqa: BLE001 — CLI boundary: any failure is a concise nonzero exit
         print(f"error: {exc}", file=sys.stderr)
         return 1
