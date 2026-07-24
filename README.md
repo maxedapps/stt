@@ -1,160 +1,173 @@
-# stt — English Qwen3 speech-to-text CLI
+# stt — local English speech-to-text for Apple Silicon
 
-Local Apple Silicon CLI that runs **Qwen3-ASR-1.7B** once per English media file and writes four punctuated artifacts:
+Turn one audio or video file into a punctuated transcript and captions on your Mac. Runs entirely locally after the first model download.
 
-| Artifact | Description |
+## What you get
+
+For an input like `interview.mp4`, `stt` writes four files:
+
+| File | What it is |
 |---|---|
-| `<stem>.txt` | Canonical transcript + one trailing newline |
-| `<stem>.words.json` | Schema-v1 timed alignment units with restored punctuation |
-| `<stem>.srt` | SubRip captions |
-| `<stem>.vtt` | WebVTT captions |
+| `interview.txt` | Full transcript |
+| `interview.srt` | Captions (SubRip) — use this in editors / YouTube |
+| `interview.vtt` | Captions (WebVTT) |
+| `interview.words.json` | Timed words/units with punctuation (advanced) |
+
+English only. One file per run.
 
 ## Requirements
 
-- Apple Silicon macOS (MLX)
-- Python 3.12 (managed by uv)
-- [uv](https://docs.astral.sh/uv/)
-- `ffmpeg` on `PATH` (any format ffmpeg can decode)
-- ~**6.1 GiB** disk for the pinned ASR + forced-aligner Hugging Face snapshots (downloaded on first use into the normal HF cache)
+- **Apple Silicon Mac** (M1 / M2 / M3 / M4 …) — Intel Macs are not supported
+- **macOS** with a normal Metal/GPU setup
+- [**uv**](https://docs.astral.sh/uv/) (installs the app and the right Python)
+- **ffmpeg** on your PATH (`brew install ffmpeg`)
+- About **6 GB** free disk for speech models (downloaded automatically on first use)
+- Network on **first run** (or a copied model cache — see below)
 
-## Install
+## Install (any Mac user)
 
 ```bash
-uv sync --frozen --dev
+# 1) system tools
+brew install ffmpeg uv
+
+# 2) get this project
+git clone <THIS_REPO_URL> stt
+cd stt
+
+# 3) install the global `stt` command (~/.local/bin/stt)
+uv tool install --editable .
+```
+
+If the shell says `stt: command not found`:
+
+```bash
+uv tool update-shell
+# open a new terminal, or ensure ~/.local/bin is on your PATH
+```
+
+Check:
+
+```bash
+stt --help
+```
+
+### Update
+
+```bash
+cd stt
+git pull
+uv tool install --force --editable .
+```
+
+### Uninstall
+
+```bash
+uv tool uninstall stt
 ```
 
 ## Usage
 
-```bash
-uv run stt INPUT [-o DIR] [--overwrite]
-```
-
-- `INPUT` — one audio/video file
-- `-o` / `--output-dir` — output directory (default: `.`); created if missing
-- `--overwrite` — replace existing artifact files with the same names
-
-English is always forced. All four formats are always written. There are no model, language, format, streaming, diarization, or batch flags.
-
-Example:
+From **any folder**:
 
 ```bash
-uv run stt interview.wav -o ./transcripts
+stt /path/to/video.mp4 -o ./out
 ```
 
-On success, the four absolute-or-relative artifact paths are printed to **stdout** (one per line). Progress and errors go to **stderr** (flushed phase lines such as resolving models, transcribing/aligning, writing artifacts). Exit code is `0` only after all four files are committed.
+### Options
 
-Typical stderr phases:
+| Flag | Meaning |
+|---|---|
+| `INPUT` | One audio/video file ffmpeg can read |
+| `-o` / `--output-dir` | Where to write outputs (default: current folder; created if missing) |
+| `--overwrite` | Replace existing output files with the same names |
+| `--terms PATH` | Optional keywords file (default: `./terms.txt` if it exists) |
+
+Examples:
+
+```bash
+# basic
+stt lecture.mov -o ./captions
+
+# replace a previous run
+stt lecture.mov -o ./captions --overwrite
+
+# bias spelling of names / product terms
+stt lecture.mov -o ./captions --terms ./terms.txt
+```
+
+On success, the four output paths are printed (one per line). Progress messages go to stderr.
+
+**First run** can take a while: it downloads ~6 GB of models, then loads them and transcribes. Later runs reuse the cache and are much snappier to start (long videos still take time to process).
+
+### Keywords (`terms.txt`)
+
+Optional. Helps with names and jargon (soft bias, not a guarantee).
+
+- One term per line  
+- A term may contain spaces (`Maximilian Schwarzmüller`)  
+- Blank lines and lines starting with `#` are ignored  
 
 ```text
-stt: checking output paths…
-stt: resolving ASR model (cache-first)…
-stt: ASR ready: …
-stt: resolving forced-aligner model (cache-first)…
-stt: aligner ready: …
-stt: transcribing + aligning (often the long step; loads models, then runs MLX)…
-stt: validating transcription result…
-stt: writing artifacts (N timed units)…
-stt: done
+# terms.txt
+Academind
+App Router
+Maximilian Schwarzmüller
+fal.ai
 ```
 
-## Models and cache
+- If you don’t pass `--terms`, `stt` looks for `./terms.txt` in the current folder  
+- Missing default file → continues without terms  
+- If you pass `--terms some/path.txt` and it’s missing → error  
 
-Pinned immutable revisions (first resolved cache-first, then online only on cache miss):
-
-- `Qwen/Qwen3-ASR-1.7B` @ `7278e1e70fe206f11671096ffdd38061171dd6e5`
-- `Qwen/Qwen3-ForcedAligner-0.6B` @ `c7cbfc2048c462b0d63a45797104fc9db3ad62b7`
-
-**Cold run:** downloads into the Hugging Face hub cache (~6.1 GiB total).  
-**Warm run:** uses local snapshots only; no network required.
-
-To forbid network access after a warm cache exists:
+### Offline use (after first download)
 
 ```bash
-HF_HUB_OFFLINE=1 uv run stt interview.wav -o ./out --overwrite
+HF_HUB_OFFLINE=1 stt lecture.mov -o ./captions --overwrite
 ```
 
-A cache miss with `HF_HUB_OFFLINE=1` fails with a concise error (no download attempt).
+## Sharing this tool with other Mac users
 
-## Output schema and bytes
+Send them this repo and the **Install** section above.
 
-### TXT
+They need:
 
-Canonical `TranscriptionResult.text` plus exactly one final LF.  
-Empty speech (accepted empty result): `b"\n"`.
+1. An Apple Silicon Mac  
+2. Access to the git repo (public URL, or invite if private)  
+3. `brew install ffmpeg uv`  
+4. `uv tool install --editable .` from a clone  
 
-### `.words.json` (schema version 1)
+They do **not** need your project folders, Python expertise, or a cloud API key.
 
-UTF-8, `ensure_ascii=False`, indent 2, trailing LF. Top-level keys **exactly**:
+### Optional: skip the big download on their machine
 
-```json
-{
-  "schema_version": 1,
-  "text": "<canonical transcript>",
-  "language": "English",
-  "words": [
-    {"text": "<display unit>", "start_ms": 0, "end_ms": 120}
-  ]
-}
-```
+After you’ve run `stt` once, models live in the Hugging Face cache (usually `~/.cache/huggingface/hub/`). You can copy these folders to the same place on another Mac:
 
-- `schema_version` is integer `1`
-- `language` is always `"English"`
-- `words[]` maps **1:1 to forced-aligner units** (not guaranteed linguistic words)
-- each `words[].text` includes that unit’s owned source punctuation/capitalization
-- root `text` is the only lossless canonical transcript
-- timestamps are integer milliseconds, monotonic non-overlapping (`start_ms <= end_ms <= next.start_ms`)
+- `models--Qwen--Qwen3-ASR-1.7B`
+- `models--Qwen--Qwen3-ForcedAligner-0.6B`
 
-Empty result:
+Then their first transcription can run with less or no network (`HF_HUB_OFFLINE=1` once the cache is complete).
 
-```json
-{
-  "schema_version": 1,
-  "text": "",
-  "language": "English",
-  "words": []
-}
-```
+## What to expect
 
-### SRT / VTT
+- **Local & private** after models are cached — audio isn’t sent to a caption SaaS  
+- **English** speech works best; other languages are out of scope  
+- **Punctuation and capitalization** are kept in transcript and captions  
+- Output files are written safely (no half-written caption files left behind)  
+- If an output name already exists, `stt` refuses to overwrite unless you pass `--overwrite`  
+- It will never overwrite your input media file  
 
-Built from the same restored units and fixed cue-grouping policy (max 10 units, 42 display chars, 6000 ms, break on gaps ≥ 800 ms and sentence-ending punctuation).  
-Empty result: SRT `b""`, VTT `b"WEBVTT\n\n"`.
+## Troubleshooting
 
-## Overwrite and collision semantics
+| Problem | What to try |
+|---|---|
+| `stt: command not found` | `uv tool install --editable .` from the repo; ensure `~/.local/bin` is on `PATH` (`uv tool update-shell`) |
+| Not Apple Silicon / MLX errors | This tool only supports Apple Silicon Macs |
+| `ffmpeg` errors | `brew install ffmpeg` and confirm `ffmpeg -version` |
+| First run very slow | Normal — model download + load; watch stderr progress lines |
+| Cache miss with offline mode | Run once online, or copy the HF model folders (see above) |
+| Existing outputs | Add `--overwrite` or choose another `-o` directory |
+| Names misspelled | Add them to `terms.txt` and pass `--terms` |
 
-- Before any model work, if any target path already exists and `--overwrite` is not set, the CLI fails.
-- A target that is a directory is always rejected.
-- A target that aliases the input path (resolved path equality or `samefile`) is **always** rejected, even with `--overwrite`.
-- Payloads are fully rendered in memory, written to same-directory temp files (`.*.tmp-*`), then committed:
-  - with `--overwrite`: `os.replace(temp, target)`
-  - without: `os.link(temp, target)` then unlink temp (atomic no-clobber; a racer created after preflight is never overwritten)
-- No target is ever visible with partial bytes. A mid-commit failure may leave a **subset** of complete artifacts (no cross-file transaction). Crash durability / `fsync` are not claimed. Temps are cleaned on failure.
+## Limits (by design)
 
-## English-only punctuation guarantee
-
-Qwen’s punctuated transcript is canonical. Exact English reconciliation maps that source text onto forced-alignment units (mirroring the upstream aligner cleaner) before cue grouping, so SRT/VTT/JSON unit text keep punctuation and capitalization. Mismatch is a hard failure — no fuzzy recovery and no punctuation-stripped fallback.
-
-This ownership policy is **English-only**. Multilingual / CJK handling is intentionally deferred.
-
-## Deferred features
-
-Not in scope: multilingual tokenization, batch inputs, streaming/microphone capture, diarization, server/API mode, model/backend selection, quantization, transcript grammar rewriting, one-word-per-cue subtitles, configurable caption policies, doctor/download subcommands, air-gapped model packaging, cross-file transactional commits, crash-durability guarantees.
-
-## Development
-
-```bash
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-```
-
-### Real-model Mac smoke (optional)
-
-Requires network once for the official sample WAV and (if cold) model download:
-
-```bash
-# see plan T4 for the full checksummed sequence; validator:
-uv run python scripts/validate_smoke.py /path/to/output-dir
-```
-
-The smoke validator compares against a pinned independent oracle transcript and prints `SMOKE OK`.
+No batch folder mode, live microphone streaming, speaker labels, language selection, or cloud/API server in this tool. One English file in → four caption/transcript files out.
