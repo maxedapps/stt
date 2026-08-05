@@ -154,6 +154,7 @@ Then their first transcription can run with less or no network (`HF_HUB_OFFLINE=
 - **English** speech works best; other languages are out of scope  
 - **Punctuation and capitalization** are kept in transcript and captions  
 - Long-file aligner timestamps that overshoot an internal audio-chunk boundary are safely bounded to that chunk; unrelated malformed timing still fails closed
+- Collapsed word timestamps remain available in words JSON, while generated SRT/VTT cues always receive a positive interval
 - Output files are written safely (no half-written caption files left behind)  
 - If an output name already exists, `stt` refuses to overwrite unless you pass `--overwrite`  
 - It will never overwrite your input media file  

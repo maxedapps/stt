@@ -358,6 +358,20 @@ def _timed_units(
     return tuple(units), source
 
 
+def test_group_gives_collapsed_alignment_a_positive_caption_interval():
+    unit = SourceUnit(
+        text="Okay.",
+        start_ms=69_875,
+        end_ms=69_875,
+        source_start=0,
+        source_end=5,
+    )
+
+    cues = group_cues((unit,), "Okay.")
+
+    assert cues == [Cue(text="Okay.", start_ms=69_875, end_ms=69_876)]
+
+
 def test_group_max_10_units_allows_10():
     texts = [f"w{i}" for i in range(10)]
     units, source = _timed_units(texts, unit_dur=50, gap=0)

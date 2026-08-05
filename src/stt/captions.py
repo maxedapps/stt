@@ -227,11 +227,14 @@ def group_cues(
         nonlocal current
         if not current:
             return
+        start_ms = current[0].start_ms
         cues.append(
             Cue(
                 text=cue_text_for(current),
-                start_ms=current[0].start_ms,
-                end_ms=current[-1].end_ms,
+                start_ms=start_ms,
+                # SRT/VTT cues require a positive interval even when the
+                # forced aligner collapses every unit in this cue to one point.
+                end_ms=max(current[-1].end_ms, start_ms + 1),
             )
         )
         current = []
