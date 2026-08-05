@@ -99,12 +99,54 @@ def _is_kept_aligner_char(ch: str) -> bool:
     return cat.startswith(("L", "N"))
 
 
+def _alignment_tokens(text: str) -> list[str]:
+    """Mirror the upstream English aligner's whitespace-token cleaning."""
+    return [
+        cleaned
+        for token in text.split()
+        if (cleaned := "".join(ch for ch in token if _is_kept_aligner_char(ch)))
+    ]
+
+
 def _has_alignable_unit(text: str) -> bool:
     """True if any whitespace-split token retains aligner-kept characters."""
-    for token in text.split():
-        cleaned = "".join(ch for ch in token if _is_kept_aligner_char(ch))
-        if cleaned:
+    return bool(_alignment_tokens(text))
+
+
+def _contains_context_echo(raw: Any, context: str) -> bool:
+    """Detect an exact domain-context echo before accepting model output.
+
+    A long vocabulary list can be emitted verbatim on quiet chunks. Exact
+    whole-chunk matches are always echoes; longer token sequences are specific
+    enough to detect inside otherwise valid chunk text without guessing about
+    individual spoken domain terms.
+    """
+    context_normalized = " ".join(context.split())
+    context_tokens = _alignment_tokens(context)
+    if not context_normalized or not context_tokens:
+        return False
+
+    chunks = getattr(raw, "chunks", None)
+    texts: list[str] = []
+    if isinstance(chunks, Sequence) and not isinstance(chunks, (str, bytes)):
+        for chunk in chunks:
+            if isinstance(chunk, Mapping) and isinstance(chunk.get("text"), str):
+                texts.append(chunk["text"])
+    if not texts:
+        raw_text = getattr(raw, "text", "")
+        if isinstance(raw_text, str):
+            texts.append(raw_text)
+
+    for candidate in texts:
+        if " ".join(candidate.split()) == context_normalized:
             return True
+        if len(context_tokens) < 8:
+            continue
+        candidate_tokens = _alignment_tokens(candidate)
+        width = len(context_tokens)
+        for index in range(len(candidate_tokens) - width + 1):
+            if candidate_tokens[index : index + width] == context_tokens:
+                return True
     return False
 
 
@@ -128,6 +170,149 @@ def _require_mapping(segment: Any, index: int) -> Mapping[str, Any]:
     return segment
 
 
+def _normalize_with_chunk_bounds(
+    text: str,
+    segments: Sequence[Any],
+    chunks: Any,
+) -> tuple[AlignmentUnit, ...] | None:
+    """Bound known upstream aligner overruns to their owning audio chunks.
+
+    ``mlx-qwen3-asr`` aligns each independently generated chunk, but its final
+    timestamp token can occasionally point beyond that chunk's audio. The next
+    chunk then starts before that token ends. Chunk metadata is authoritative:
+    validate the exact chunk/text/unit relationship and clamp only right-edge
+    overruns. Any other malformed timing still fails closed.
+    """
+    if chunks is None:
+        return None
+    if not isinstance(chunks, Sequence) or isinstance(chunks, (str, bytes)):
+        raise ResultValidationError(
+            f"chunks must be a sequence, got {type(chunks).__name__}"
+        )
+    if len(chunks) == 0:
+        raise ResultValidationError("nonempty text requires a complete chunk sequence")
+
+    chunk_records: list[tuple[str, int, int, list[str]]] = []
+    previous_end_ms: int | None = None
+    for index, chunk_raw in enumerate(chunks):
+        if not isinstance(chunk_raw, Mapping):
+            raise ResultValidationError(
+                f"chunk[{index}] must be a mapping, got {type(chunk_raw).__name__}"
+            )
+        chunk = chunk_raw
+        missing = [key for key in ("text", "start", "end") if key not in chunk]
+        if missing:
+            raise ResultValidationError(
+                f"chunk[{index}] missing keys: {', '.join(missing)}"
+            )
+        chunk_text = chunk["text"]
+        if not isinstance(chunk_text, str):
+            raise ResultValidationError(
+                f"chunk[{index}].text must be str, got {type(chunk_text).__name__}"
+            )
+        start = chunk["start"]
+        end = chunk["end"]
+        if not _is_real_number(start):
+            raise ResultValidationError(
+                f"chunk[{index}].start must be a finite number, got {start!r}"
+            )
+        if not _is_real_number(end):
+            raise ResultValidationError(
+                f"chunk[{index}].end must be a finite number, got {end!r}"
+            )
+        start_ms = _seconds_to_ms(start)
+        end_ms = _seconds_to_ms(end)
+        if start_ms < 0 or end_ms < 0:
+            raise ResultValidationError(
+                f"chunk[{index}] has negative timestamp after conversion "
+                f"({start_ms}, {end_ms})"
+            )
+        if start_ms > end_ms:
+            raise ResultValidationError(
+                f"chunk[{index}] has reversed times after conversion "
+                f"({start_ms} > {end_ms})"
+            )
+        if previous_end_ms is not None and abs(previous_end_ms - start_ms) > 1:
+            raise ResultValidationError(
+                f"chunk[{index}] does not continue the previous chunk "
+                f"({previous_end_ms} != {start_ms})"
+            )
+        previous_end_ms = end_ms
+        chunk_records.append(
+            (chunk_text, start_ms, end_ms, _alignment_tokens(chunk_text))
+        )
+
+    joined_text = " ".join(record[0] for record in chunk_records)
+    if joined_text != text:
+        raise ResultValidationError("joined chunk text does not match transcript text")
+
+    expected_count = sum(len(record[3]) for record in chunk_records)
+    if expected_count != len(segments):
+        raise ResultValidationError(
+            f"alignment unit count {len(segments)} != chunk token count {expected_count}"
+        )
+
+    units: list[AlignmentUnit] = []
+    segment_index = 0
+    for _chunk_text, chunk_start_ms, chunk_end_ms, tokens in chunk_records:
+        for expected_text in tokens:
+            seg = _require_mapping(segments[segment_index], segment_index)
+            missing = [key for key in ("text", "start", "end") if key not in seg]
+            if missing:
+                raise ResultValidationError(
+                    f"segment[{segment_index}] missing keys: {', '.join(missing)}"
+                )
+            seg_text = seg["text"]
+            if not isinstance(seg_text, str):
+                raise ResultValidationError(
+                    f"segment[{segment_index}].text must be str, got "
+                    f"{type(seg_text).__name__}"
+                )
+            if seg_text != expected_text:
+                raise ResultValidationError(
+                    f"segment[{segment_index}].text {seg_text!r} != chunk token "
+                    f"{expected_text!r}"
+                )
+            start = seg["start"]
+            end = seg["end"]
+            if not _is_real_number(start):
+                raise ResultValidationError(
+                    f"segment[{segment_index}].start must be a finite number, "
+                    f"got {start!r}"
+                )
+            if not _is_real_number(end):
+                raise ResultValidationError(
+                    f"segment[{segment_index}].end must be a finite number, got {end!r}"
+                )
+            start_ms = _seconds_to_ms(start)
+            end_ms = _seconds_to_ms(end)
+            if start_ms < chunk_start_ms or end_ms < chunk_start_ms:
+                raise ResultValidationError(
+                    f"segment[{segment_index}] starts before its owning chunk "
+                    f"({start_ms}, {end_ms}) < {chunk_start_ms}"
+                )
+            if start_ms > end_ms:
+                raise ResultValidationError(
+                    f"segment[{segment_index}] has reversed times after conversion "
+                    f"({start_ms} > {end_ms})"
+                )
+
+            # The upstream forced aligner can overshoot only the right edge of
+            # its current audio chunk. Collapse a wholly overshooting unit to
+            # the boundary rather than shifting the next, trustworthy chunk.
+            start_ms = min(start_ms, chunk_end_ms)
+            end_ms = min(end_ms, chunk_end_ms)
+            if units and units[-1].end_ms > start_ms:
+                raise ResultValidationError(
+                    f"segment[{segment_index}] overlaps previous unit "
+                    f"({units[-1].end_ms} > {start_ms})"
+                )
+            units.append(AlignmentUnit(text=seg_text, start_ms=start_ms, end_ms=end_ms))
+            segment_index += 1
+
+    return tuple(units)
+
+
 def normalize_result(raw: Any) -> Transcription:
     """Validate an upstream transcription result and convert to frozen local records."""
     if raw is None:
@@ -137,6 +322,7 @@ def normalize_result(raw: Any) -> Transcription:
         text = raw.text
         language = raw.language
         segments = raw.segments
+        chunks = getattr(raw, "chunks", None)
         truncated = getattr(raw, "truncated", False)
     except AttributeError as exc:
         raise ResultValidationError(
@@ -184,6 +370,14 @@ def normalize_result(raw: Any) -> Transcription:
     if len(segments) == 0:
         raise ResultValidationError(
             "nonempty text requires a complete segment sequence"
+        )
+
+    chunk_bounded_units = _normalize_with_chunk_bounds(text, segments, chunks)
+    if chunk_bounded_units is not None:
+        return Transcription(
+            text=text,
+            language=_FORCED_LANGUAGE,
+            units=chunk_bounded_units,
         )
 
     units: list[AlignmentUnit] = []
@@ -250,6 +444,7 @@ def _call_transcribe(
         model=str(asr_path),
         language=_FORCED_LANGUAGE,
         return_timestamps=True,
+        return_chunks=True,
         forced_aligner=str(aligner_path),
         context=context,
     )
@@ -291,6 +486,20 @@ def run_transcription(input_path: Path, *, context: str = "") -> Transcription:
         raise
     except Exception as exc:
         raise EngineError(f"transcription failed: {exc}") from exc
+
+    if context and _contains_context_echo(raw, context):
+        _progress("detected verbatim domain-context echo; retrying once without terms…")
+        try:
+            raw = _call_transcribe(
+                input_path,
+                asr_path,
+                aligner_path,
+                context="",
+            )
+        except EngineError:
+            raise
+        except Exception as exc:
+            raise EngineError(f"transcription retry failed: {exc}") from exc
 
     _progress("validating transcription result…")
     return normalize_result(raw)

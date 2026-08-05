@@ -32,6 +32,7 @@ class FakeResult:
     text: str
     language: str
     segments: list[dict[str, Any]] | None = None
+    chunks: list[dict[str, Any]] | None = None
     truncated: bool = False
 
 
@@ -215,6 +216,68 @@ def test_normalize_rounding_to_ms():
     assert result.units[0].end_ms == 2
 
 
+def test_normalize_clamps_known_aligner_overrun_to_chunk_boundary():
+    raw = FakeResult(
+        text="first next",
+        language="English",
+        segments=[
+            {"text": "first", "start": 60.0, "end": 78.595},
+            {"text": "next", "start": 71.967, "end": 72.4},
+        ],
+        chunks=[
+            {"text": "first", "start": 0.0, "end": 71.967},
+            {"text": "next", "start": 71.967, "end": 100.0},
+        ],
+    )
+
+    result = normalize_result(raw)
+
+    assert result.units == (
+        AlignmentUnit(text="first", start_ms=60_000, end_ms=71_967),
+        AlignmentUnit(text="next", start_ms=71_967, end_ms=72_400),
+    )
+
+
+def test_normalize_accepts_one_millisecond_chunk_rounding_gap():
+    raw = FakeResult(
+        text="first next",
+        language="English",
+        segments=[
+            {"text": "first", "start": 0.0, "end": 1.0004},
+            {"text": "next", "start": 1.0006, "end": 1.4},
+        ],
+        chunks=[
+            {"text": "first", "start": 0.0, "end": 1.0004},
+            {"text": "next", "start": 1.0006, "end": 2.0},
+        ],
+    )
+
+    result = normalize_result(raw)
+
+    assert result.units[0].end_ms == 1_000
+    assert result.units[1].start_ms == 1_001
+
+
+def test_normalize_collapses_wholly_overshooting_unit_to_chunk_boundary():
+    raw = FakeResult(
+        text="late next",
+        language="English",
+        segments=[
+            {"text": "late", "start": 73.0, "end": 78.595},
+            {"text": "next", "start": 71.967, "end": 72.4},
+        ],
+        chunks=[
+            {"text": "late", "start": 0.0, "end": 71.967},
+            {"text": "next", "start": 71.967, "end": 100.0},
+        ],
+    )
+
+    result = normalize_result(raw)
+
+    assert result.units[0] == AlignmentUnit(text="late", start_ms=71_967, end_ms=71_967)
+    assert result.units[1].start_ms == 71_967
+
+
 # ---------------------------------------------------------------------------
 # normalize_result — reject
 # ---------------------------------------------------------------------------
@@ -350,6 +413,52 @@ def test_reject_overlapping_times():
         )
 
 
+def test_reject_chunk_text_or_unit_mismatch():
+    with pytest.raises(ResultValidationError, match="joined chunk text"):
+        normalize_result(
+            FakeResult(
+                text="a b",
+                language="English",
+                segments=[
+                    {"text": "a", "start": 0.0, "end": 0.5},
+                    {"text": "b", "start": 0.5, "end": 0.8},
+                ],
+                chunks=[{"text": "a c", "start": 0.0, "end": 1.0}],
+            )
+        )
+
+    with pytest.raises(ResultValidationError, match="!= chunk token"):
+        normalize_result(
+            FakeResult(
+                text="a b",
+                language="English",
+                segments=[
+                    {"text": "a", "start": 0.0, "end": 0.5},
+                    {"text": "wrong", "start": 0.5, "end": 0.8},
+                ],
+                chunks=[{"text": "a b", "start": 0.0, "end": 1.0}],
+            )
+        )
+
+
+def test_reject_segment_before_owning_chunk():
+    with pytest.raises(ResultValidationError, match="before its owning chunk"):
+        normalize_result(
+            FakeResult(
+                text="a b",
+                language="English",
+                segments=[
+                    {"text": "a", "start": 0.0, "end": 0.5},
+                    {"text": "b", "start": 0.9, "end": 1.2},
+                ],
+                chunks=[
+                    {"text": "a", "start": 0.0, "end": 1.0},
+                    {"text": "b", "start": 1.0, "end": 2.0},
+                ],
+            )
+        )
+
+
 def test_reject_post_rounding_invalidity():
     """Values that round to a reversed or negative millisecond pair are rejected."""
     # 0.0004 → 0 ms, -0.0004 → 0 ms is ok equal; use values that reverse after round
@@ -470,6 +579,7 @@ def test_run_transcription_calls_mlx_once_with_exact_args(
         model=str(asr),
         language="English",
         return_timestamps=True,
+        return_chunks=True,
         forced_aligner=str(aligner),
         context="",
     )
@@ -507,9 +617,57 @@ def test_run_transcription_passes_context_to_mlx(
         model=str(asr),
         language="English",
         return_timestamps=True,
+        return_chunks=True,
         forced_aligner=str(aligner),
         context="Academind App Router",
     )
+
+
+def test_run_transcription_retries_once_without_echoed_domain_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    media = tmp_path / "clip.wav"
+    media.write_bytes(b"fake")
+    asr = tmp_path / "asr"
+    aligner = tmp_path / "aligner"
+    asr.mkdir()
+    aligner.mkdir()
+
+    monkeypatch.setattr(
+        "stt.engine.resolve_snapshot",
+        lambda repo_id, revision: asr if repo_id == ASR_MODEL_ID else aligner,
+    )
+    context = "Alpha Beta Gamma Delta Epsilon Zeta Eta Theta"
+    echoed = FakeResult(
+        text=context,
+        language="English",
+        segments=[
+            {"text": token, "start": index / 10, "end": (index + 1) / 10}
+            for index, token in enumerate(context.split())
+        ],
+        chunks=[{"text": context, "start": 0.0, "end": 1.0}],
+    )
+    clean = FakeResult(
+        text="Real speech",
+        language="English",
+        segments=[
+            {"text": "Real", "start": 0.1, "end": 0.3},
+            {"text": "speech", "start": 0.3, "end": 0.6},
+        ],
+        chunks=[{"text": "Real speech", "start": 0.0, "end": 1.0}],
+    )
+    mlx_transcribe = MagicMock(side_effect=[echoed, clean])
+    import mlx_qwen3_asr
+
+    monkeypatch.setattr(mlx_qwen3_asr, "transcribe", mlx_transcribe)
+
+    result = run_transcription(media, context=context)
+
+    assert result.text == "Real speech"
+    assert mlx_transcribe.call_count == 2
+    assert mlx_transcribe.call_args_list[0].kwargs["context"] == context
+    assert mlx_transcribe.call_args_list[1].kwargs["context"] == ""
+    assert "retrying once without terms" in capsys.readouterr().err
 
 
 def test_run_transcription_preserves_upstream_failure(

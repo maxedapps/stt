@@ -1,6 +1,6 @@
 [project]
 name = "stt"
-version = "0.1.0"
+version = "0.1.1"
 description = "English Qwen3 speech-to-text CLI for Apple Silicon"
 readme = "README.md"
 license = "MIT"

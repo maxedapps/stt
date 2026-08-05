@@ -118,6 +118,7 @@ fal.ai
 - If you don’t pass `--terms`, `stt` looks for `./terms.txt` in the current folder  
 - Missing default file → continues without terms  
 - If you pass `--terms some/path.txt` and it’s missing → error  
+- If Qwen emits the supplied vocabulary verbatim, `stt` rejects that contaminated pass and retries once without terms
 
 ### Offline use (after first download)
 
@@ -152,6 +153,7 @@ Then their first transcription can run with less or no network (`HF_HUB_OFFLINE=
 - **Local & private** after models are cached — audio isn’t sent to a caption SaaS  
 - **English** speech works best; other languages are out of scope  
 - **Punctuation and capitalization** are kept in transcript and captions  
+- Long-file aligner timestamps that overshoot an internal audio-chunk boundary are safely bounded to that chunk; unrelated malformed timing still fails closed
 - Output files are written safely (no half-written caption files left behind)  
 - If an output name already exists, `stt` refuses to overwrite unless you pass `--overwrite`  
 - It will never overwrite your input media file  
@@ -167,6 +169,7 @@ Then their first transcription can run with less or no network (`HF_HUB_OFFLINE=
 | Cache miss with offline mode | Run once online, or copy the HF model folders (see above) |
 | Existing outputs | Add `--overwrite` or choose another `-o` directory |
 | Names misspelled | Add them to `terms.txt` and pass `--terms` |
+| `detected verbatim domain-context echo` | `stt` automatically retries once without terms so the echoed vocabulary is not published |
 
 ## Limits (by design)
 
